@@ -14,18 +14,16 @@
  * limitations under the License.
  */
 
-import {PropertyTreeNode} from 'trace/tree_node/property_tree_node';
-import {AbsoluteEntryIndex} from './index_types';
+syntax = "proto2";
 
-export interface Transition {
-  id: number;
-  type: string;
-  sendTime?: PropertyTreeNode;
-  dispatchTime?: PropertyTreeNode;
-  duration?: string;
-  merged: boolean;
-  aborted: boolean;
-  played: boolean;
-  propertiesTree: PropertyTreeNode;
-  traceIndex: AbsoluteEntryIndex;
+package perfetto.protos;
+
+import "protos/perfetto/trace/android/android_input_event.proto";
+
+message InputEventWrapper {
+  oneof input_event {
+    AndroidMotionEvent motion_event = 1;
+    AndroidKeyEvent key_event = 2;
+  }
+  repeated AndroidWindowInputDispatchEvent window_dispatch_events = 3;
 }
