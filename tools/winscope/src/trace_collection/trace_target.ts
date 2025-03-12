@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024 The Android Open Source Project
+ * Copyright (C) 2025 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,19 +14,21 @@
  * limitations under the License.
  */
 
-// A reactive state which changes based on adb host/device state, or tracing session state
-// Used to change what is displayed in the UI
-export enum ConnectionState {
-  ERROR,
-  CONNECTING,
-  NOT_FOUND,
-  INVALID_VERSION,
-  UNAUTH,
-  IDLE,
-  STARTING_TRACE,
-  TRACING,
-  ENDING_TRACE,
-  DUMPING_STATE,
-  LOADING_DATA,
-  TRACE_TIMEOUT,
+export class TraceTarget {
+  constructor(
+    readonly traceName: string,
+    readonly setupCmds: string[],
+    readonly startCmd: string,
+    readonly stopCmd: string,
+    readonly fileIdentifiers: AdbFileIdentifier[],
+    readonly isScreenRecording = false,
+  ) {}
+}
+
+export class AdbFileIdentifier {
+  constructor(
+    readonly path: string,
+    readonly matchers: string[],
+    readonly destName: string,
+  ) {}
 }

@@ -14,19 +14,14 @@
  * limitations under the License.
  */
 
-// A reactive state which changes based on adb host/device state, or tracing session state
-// Used to change what is displayed in the UI
-export enum ConnectionState {
-  ERROR,
-  CONNECTING,
-  NOT_FOUND,
-  INVALID_VERSION,
-  UNAUTH,
-  IDLE,
-  STARTING_TRACE,
-  TRACING,
-  ENDING_TRACE,
-  DUMPING_STATE,
-  LOADING_DATA,
-  TRACE_TIMEOUT,
+import {UiTraceTarget} from './ui/ui_trace_target';
+
+export interface UserRequest {
+  target: UiTraceTarget;
+  config: UserRequestConfig[];
+}
+
+export interface UserRequestConfig {
+  key: string;
+  value?: string | string[];
 }
