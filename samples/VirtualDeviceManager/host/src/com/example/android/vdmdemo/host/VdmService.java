@@ -44,6 +44,7 @@ import android.companion.virtual.VirtualDeviceParams;
 import android.companion.virtual.sensor.VirtualSensorConfig;
 import android.companion.virtualdevice.flags.Flags;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
 import android.content.IntentSender.SendIntentException;
@@ -60,6 +61,7 @@ import android.os.Looper;
 import android.os.UserHandle;
 import android.util.Log;
 import android.view.Display;
+import android.view.Surface;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -84,6 +86,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
@@ -139,6 +142,7 @@ public final class VdmService extends Hilt_VdmService {
     private VirtualDeviceManager.VirtualDevice mVirtualDevice;
     private DeviceCapabilities mDeviceCapabilities;
     private Intent mPendingRemoteIntent = null;
+    private int mNextLocalDisplayId = 0;
     private @RemoteDisplay.DisplayType int mPendingDisplayType = RemoteDisplay.DISPLAY_TYPE_APP;
     private DisplayManager mDisplayManager;
     private KeyguardManager mKeyguardManager;
@@ -322,15 +326,9 @@ public final class VdmService extends Hilt_VdmService {
     public void onCreate() {
         super.onCreate();
 
-        mConnectionManager.addConnectionCallback(mConnectionCallback);
-        mConnectionManager.startHostSession(
-                mPreferenceController.getString(R.string.pref_network_channel));
-
         mKeyguardManager = getSystemService(KeyguardManager.class);
         mDisplayManager = getSystemService(DisplayManager.class);
         Objects.requireNonNull(mDisplayManager).registerDisplayListener(mDisplayListener, null);
-
-        mRemoteIo.addMessageConsumer(mRemoteEventConsumer);
 
         mPreferenceController.addPreferenceObserver(this, mPreferenceObservers);
 
@@ -348,6 +346,18 @@ public final class VdmService extends Hilt_VdmService {
             };
             mVirtualDeviceManager.registerVirtualDeviceListener(
                     Executors.newSingleThreadExecutor(), mVirtualDeviceListener);
+        }
+
+        if (!mPreferenceController.getBoolean(R.string.pref_standalone_host_demo)) {
+            mConnectionManager.addConnectionCallback(mConnectionCallback);
+            mConnectionManager.startHostSession(
+                    mPreferenceController.getString(R.string.pref_network_channel));
+            mRemoteIo.addMessageConsumer(mRemoteEventConsumer);
+        } else {
+            mDeviceCapabilities = DeviceCapabilities.newBuilder()
+                    .setDeviceName("Synthetic VDM Client")
+                    .build();
+            associateAndCreateVirtualDevice();
         }
     }
 
@@ -376,33 +386,17 @@ public final class VdmService extends Hilt_VdmService {
         if (event.hasDeviceCapabilities()) {
             mDeviceCapabilities = event.getDeviceCapabilities();
             associateAndCreateVirtualDevice();
-            handleAudioCapabilities();
         } else if (event.hasDisplayCapabilities() && !mDisplayRepository.resetDisplay(event)) {
-            RemoteDisplay remoteDisplay =
-                    new RemoteDisplay(
-                            this,
-                            event,
-                            mVirtualDevice,
-                            mRemoteIo,
-                            mPendingDisplayType,
-                            mPreferenceController);
-            mDisplayRepository.addDisplay(remoteDisplay);
-            mPendingDisplayType = RemoteDisplay.DISPLAY_TYPE_APP;
-            if (mPendingRemoteIntent != null) {
-                remoteDisplay.launchIntent(mPendingRemoteIntent);
-                mPendingRemoteIntent = null;
-            }
+            createRemoteDisplay(this, event.getDisplayId(),
+                    event.getDisplayCapabilities().getViewportWidth(),
+                    event.getDisplayCapabilities().getViewportHeight(),
+                    event.getDisplayCapabilities().getDensityDpi(), null, mRemoteIo);
         } else if (event.hasStopStreaming() && !event.getStopStreaming().getPause()) {
-            mDisplayRepository.removeDisplayByRemoteId(event.getDisplayId());
+            closeRemoteDisplay(event.getDisplayId());
         } else if (event.hasDisplayChangeEvent() && event.getDisplayChangeEvent().getFocused()) {
             mInputController.setFocusedRemoteDisplayId(event.getDisplayId());
-        } else if (event.hasDeviceState() && VdmCompat.isAtLeastB()
-                && Flags.deviceAwareDisplayPower() && mVirtualDevice != null) {
-            if (event.getDeviceState().getPowerOn()) {
-                mVirtualDevice.wakeUp();
-            } else {
-                mVirtualDevice.goToSleep();
-            }
+        } else if (event.hasDeviceState()) {
+            setPowerState(event.getDeviceState().getPowerOn());
         }
     }
 
@@ -642,6 +636,8 @@ public final class VdmService extends Hilt_VdmService {
             mRemoteCameraManager.createCameras(mDeviceCapabilities.getCameraCapabilitiesList());
         }
 
+        handleAudioCapabilities();
+
         Log.i(TAG, "Created virtual device");
         for (Consumer<Boolean> listener : mLocalVirtualDeviceLifecycleListeners) {
             listener.accept(true);
@@ -680,38 +676,78 @@ public final class VdmService extends Hilt_VdmService {
     }
 
     void startStreamingHome() {
-        mPendingRemoteIntent = null;
-        mPendingDisplayType = RemoteDisplay.DISPLAY_TYPE_HOME;
+        startStreaming(null, RemoteDisplay.DISPLAY_TYPE_HOME);
+    }
+
+    void startMirroring() {
+        startStreaming(null, RemoteDisplay.DISPLAY_TYPE_MIRROR);
+    }
+
+    void startStreaming(Intent intent) {
+        startStreaming(intent, RemoteDisplay.DISPLAY_TYPE_APP);
+    }
+
+    private void startStreaming(Intent intent, int type) {
+        mPendingRemoteIntent = intent;
+        if (mPendingRemoteIntent != null) {
+            mPendingRemoteIntent.addFlags(
+                    Intent.FLAG_ACTIVITY_MULTIPLE_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
+        mPendingDisplayType = type;
+
+        if (mPreferenceController.getBoolean(R.string.pref_standalone_host_demo)) {
+            Intent displayIntent = new Intent(this, DisplayActivity.class);
+            displayIntent
+                    .addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
+            displayIntent.putExtra(DisplayActivity.EXTRA_DISPLAY_ID, ++mNextLocalDisplayId);
+            startActivity(displayIntent);
+            return;
+        }
+
+        boolean homeEnabled = mPendingDisplayType == RemoteDisplay.DISPLAY_TYPE_HOME
+                || mPendingDisplayType == RemoteDisplay.DISPLAY_TYPE_MIRROR;
         mRemoteIo.sendMessage(RemoteEvent.newBuilder()
                 .setStartStreaming(StartStreaming.newBuilder()
-                        .setHomeEnabled(true)
+                        .setHomeEnabled(homeEnabled)
                         .setRotationSupported(mPreferenceController.getBoolean(
                                 R.string.internal_pref_display_rotation_supported)))
                 .build());
     }
 
-    void startMirroring() {
-        mPendingRemoteIntent = null;
-        mPendingDisplayType = RemoteDisplay.DISPLAY_TYPE_MIRROR;
-        mRemoteIo.sendMessage(
-                RemoteEvent.newBuilder()
-                        .setStartStreaming(StartStreaming.newBuilder()
-                                .setHomeEnabled(true)
-                                .setRotationSupported(mPreferenceController.getBoolean(
-                                        R.string.internal_pref_display_rotation_supported)))
-                        .build());
+    RemoteDisplay createRemoteDisplay(
+            Context context, int displayId, int width, int height, int dpi, Surface surface,
+            RemoteIo remoteIo) {
+        Optional<RemoteDisplay> existingDisplay =
+                mDisplayRepository.getDisplayByRemoteId(displayId);
+        if (existingDisplay.isPresent()) {
+            existingDisplay.get().setSurface(surface);
+            existingDisplay.get().reset(width, height, dpi);
+            return existingDisplay.get();
+        }
+
+        RemoteDisplay remoteDisplay = new RemoteDisplay(context, displayId, width, height, dpi,
+                mVirtualDevice, surface, remoteIo, mPendingDisplayType, mPreferenceController);
+        remoteDisplay.setSurface(surface);
+        mDisplayRepository.addDisplay(remoteDisplay);
+        if (mPendingRemoteIntent != null) {
+            remoteDisplay.launchIntent(mPendingRemoteIntent);
+            mPendingRemoteIntent = null;
+        }
+        return remoteDisplay;
     }
 
-    void startStreaming(Intent intent) {
-        mPendingRemoteIntent = intent;
-        mPendingRemoteIntent.addFlags(
-                Intent.FLAG_ACTIVITY_MULTIPLE_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
-        mRemoteIo.sendMessage(
-                RemoteEvent.newBuilder()
-                        .setStartStreaming(StartStreaming.newBuilder()
-                                .setRotationSupported(mPreferenceController.getBoolean(
-                                        R.string.internal_pref_display_rotation_supported)))
-                        .build());
+    void closeRemoteDisplay(int remoteDisplayId) {
+        mDisplayRepository.removeDisplayByRemoteId(remoteDisplayId);
+    }
+
+    void setPowerState(boolean poweredOn) {
+        if (VdmCompat.isAtLeastB() && Flags.deviceAwareDisplayPower() && mVirtualDevice != null) {
+            if (poweredOn) {
+                mVirtualDevice.wakeUp();
+            } else {
+                mVirtualDevice.goToSleep();
+            }
+        }
     }
 
     void startIntentOnDisplayIndex(Intent intent, int displayIndex) {
@@ -769,8 +805,27 @@ public final class VdmService extends Hilt_VdmService {
         observers.put(R.string.pref_display_timeout, v -> recreateVirtualDevice());
         observers.put(R.string.pref_enable_display_category, v -> recreateVirtualDevice());
         observers.put(R.string.pref_network_channel, s -> {
-            mConnectionManager.disconnect();
-            mConnectionManager.startHostSession((String) s);
+            if (!mPreferenceController.getBoolean(R.string.pref_standalone_host_demo)) {
+                mConnectionManager.disconnect();
+                mConnectionManager.startHostSession((String) s);
+            }
+        });
+        observers.put(R.string.pref_standalone_host_demo, b -> {
+            if ((Boolean) b) {
+                mRemoteIo.removeMessageConsumer(mRemoteEventConsumer);
+                mConnectionManager.removeConnectionCallback(mConnectionCallback);
+                mConnectionManager.disconnect();
+                mDeviceCapabilities = DeviceCapabilities.newBuilder()
+                        .setDeviceName("Synthetic VDM Client")
+                        .build();
+                associateAndCreateVirtualDevice();
+            } else {
+                mDeviceCapabilities = null;
+                mConnectionManager.addConnectionCallback(mConnectionCallback);
+                mConnectionManager.startHostSession(
+                        mPreferenceController.getString(R.string.pref_network_channel));
+                mRemoteIo.addMessageConsumer(mRemoteEventConsumer);
+            }
         });
 
         return observers;
