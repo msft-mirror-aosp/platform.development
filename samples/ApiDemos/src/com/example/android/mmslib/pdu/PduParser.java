@@ -842,7 +842,17 @@ public class PduParser {
 
         for (int i = 0 ; i < count ; i++) {
             int headerLength = parseUnsignedInt(pduDataStream);
+            if (isInvalidLength(headerLength, pduDataStream)) {
+                Log.e(LOG_TAG, "parseParts: Invalid header length: " + headerLength
+                        + " (available: " + pduDataStream.available() + ")");
+                return null;
+            }
             int dataLength = parseUnsignedInt(pduDataStream);
+            if (isInvalidLength(dataLength, pduDataStream)) {
+                Log.e(LOG_TAG, "parseParts: Invalid data length: " + dataLength
+                        + " (available: " + pduDataStream.available() + ")");
+                return null;
+            }
             PduPart part = new PduPart();
             int startPos = pduDataStream.available();
             if (startPos <= 0) {
@@ -950,6 +960,19 @@ public class PduParser {
         if (LOCAL_LOGV) {
             Log.v(LOG_TAG, text);
         }
+    }
+
+    /**
+     * Checks if the given length is invalid for the current input stream.
+     * A length is considered invalid if it is negative or if it exceeds the number of
+     * bytes available in the stream.
+     *
+     * @param length the length to validate
+     * @param pduDataStream the input stream to check availability against
+     * @return {@code true} if the length is invalid, {@code false} otherwise
+     */
+    private static boolean isInvalidLength(int length, ByteArrayInputStream pduDataStream) {
+        return pduDataStream == null || length < 0 || length > pduDataStream.available();
     }
 
     /**
@@ -1320,13 +1343,16 @@ public class PduParser {
      */
     protected static int skipWapValue(ByteArrayInputStream pduDataStream, int length) {
         assert(null != pduDataStream);
-        byte[] area = new byte[length];
-        int readLen = pduDataStream.read(area, 0, length);
-        if (readLen < length) { //The actually read length is lower than the length
+        if (isInvalidLength(length, pduDataStream)) {
+            Log.e(LOG_TAG, "skipWapValue: Invalid length: " + length
+                    + " (available: " + pduDataStream.available() + ")");
             return -1;
-        } else {
-            return readLen;
         }
+        // Hardening: Use skip() instead of allocating a byte array to avoid unnecessary
+        // memory allocation, preventing potential OutOfMemoryErrors (OOME).
+        // ByteArrayInputStream.skip() is safe and does not allocate.
+        long skipped = pduDataStream.skip(length);
+        return (skipped < length) ? -1 : (int) skipped;
     }
 
     /**
@@ -1541,6 +1567,11 @@ public class PduParser {
         if (cur < TEXT_MIN) {
             int length = parseValueLength(pduDataStream);
             int startPos = pduDataStream.available();
+            if (length < 0 || length > startPos) {
+                Log.e(LOG_TAG, "parseContentType: Invalid length " + length
+                        + " when available bytes are " + startPos);
+                return (PduContentTypes.contentTypes[0]).getBytes(); //"*/*"
+            }
             pduDataStream.mark(1);
             temp = pduDataStream.read();
             assert(-1 != temp);
@@ -1681,8 +1712,11 @@ public class PduParser {
                             } else {
                                 pduDataStream.reset();
                                 /* Token-text */
-                                part.setContentDisposition(parseWapString(pduDataStream
-                                        , TYPE_TEXT_STRING));
+                                byte[] contentDisposition = parseWapString(pduDataStream
+                                        , TYPE_TEXT_STRING);
+                                if (null != contentDisposition) {
+                                    part.setContentDisposition(contentDisposition);
+                                }
                             }
 
                             /* get filename parameter and skip other parameters */
@@ -1690,14 +1724,25 @@ public class PduParser {
                             if (thisStartPos - thisEndPos < len) {
                                 value = pduDataStream.read();
                                 if (value == PduPart.P_FILENAME) { //filename is text-string
-                                    part.setFilename(parseWapString(pduDataStream
-                                            , TYPE_TEXT_STRING));
+                                    byte[] filename = parseWapString(pduDataStream
+                                            , TYPE_TEXT_STRING);
+                                    if (null != filename) {
+                                        part.setFilename(filename);
+                                    }
                                 }
 
                                 /* skip other parameters */
                                 thisEndPos = pduDataStream.available();
                                 if (thisStartPos - thisEndPos < len) {
                                     int last = len - (thisStartPos - thisEndPos);
+                                    if (isInvalidLength(last, pduDataStream)) {
+                                        Log.e(LOG_TAG, "parsePartHeaders: Invalid temp length: "
+                                                + last
+                                                + " (available: "
+                                                + pduDataStream.available()
+                                                + ")");
+                                        return false;
+                                    }
                                     byte[] temp = new byte[last];
                                     pduDataStream.read(temp, 0, last);
                                 }
@@ -1724,7 +1769,7 @@ public class PduParser {
                 byte[] tempValue = parseWapString(pduDataStream, TYPE_TEXT_STRING);
 
                 // Check the header whether it is "Content-Transfer-Encoding".
-                if (true ==
+                if (null != tempHeader && null != tempValue &&
                     PduPart.CONTENT_TRANSFER_ENCODING.equalsIgnoreCase(new String(tempHeader))) {
                     part.setContentTransferEncoding(tempValue);
                 }
